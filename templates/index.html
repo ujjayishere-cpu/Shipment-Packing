@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Part Scan Register - Index UI</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 10px; background-color: white; color: black; transition: background 0.3s, color 0.3s; }
+    .dark-mode { background-color: #121212; color: white; }
+    .header { display: flex; align-items: center; justify-content: space-between; }
+    #logo { height: 80px; width: 400px; } /* 3x width */
+    .tab-buttons button { margin: 5px; padding: 5px 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #ccc; padding: 5px; text-align: left; }
+    tr.duplicate { background-color: #ffdddd; cursor: pointer; }
+    #scannerInput { width: 100%; padding: 8px; font-size: 1.2em; margin-top: 10px; }
+    #settingsPanel { display: none; padding: 10px; border: 1px solid #ccc; margin-top: 10px; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    #duplicateModal { position: fixed; top: 30%; left: 30%; background: white; border: 1px solid black; padding: 20px; z-index: 10; display: none; }
+    #duplicateModal button { margin-top: 10px; }
+    #notification { margin-top: 10px; font-weight: bold; color: green; }
+    #shipmentControls { margin-top: 5px; }
+    #shipmentControls button { margin-right: 5px; }
+    @media (max-width: 600px) {
+      table { font-size: 12px; }
+      #scannerInput { font-size: 1em; }
+      #logo { width: 100%; height: auto; }
+      #shipmentControls button { margin-bottom: 5px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img id="logo" src="/static/logo.png" alt="Logo" />
+    <div>
+      <button onclick="toggleDarkMode()">🌙</button>
+      <button onclick="toggleScanner()">📷</button>
+      <button onclick="toggleSettings()">⚙️</button>
+      <button onclick="exportToExcel()">📤</button>
+    </div>
+  </div>
+
+  <h2>
+    Welcome <span id="currentUser">User</span>
+    <span id="shipmentId" style="color: green; float: right; font-size: 16px; margin-left: 10px;"></span>
+  </h2>
+
+  <div id="shipmentControls">
+    <button onclick="newShipment()">New Shipment</button>
+    <button onclick="openShipment()">Open Shipment</button>
+    <button onclick="saveShipment()">Save Shipment</button>
+    <button onclick="deleteShipment()">Delete Shipment</button>
+    <button onclick="exportShipment()">Export Shipment</button>
+  </div>
+
+  <div id="settingsPanel">
+    <label>User Name: <input id="userNameInput" type="text" onchange="saveSettings()" /></label><br/>
+    <label>Part Code Prefixes (comma separated): <input id="prefixInput" type="text" onchange="saveSettings()" /></label><br/>
+    <button onclick="saveSettings()">Save</button>
+  </div>
+
+  <input type="text" id="scannerInput" placeholder="Scan Pallet or Part Code" autofocus onkeydown="handleKeyDown(event)" />
+  <div id="notification"></div>
+
+  <div class="tab-buttons" id="tabButtons"></div>
+  <div id="tabContents"></div>
+
+  <div id="duplicateModal">
+    <p>Duplicate item detected. Delete?</p>
+    <button onclick="deleteDuplicateItem()">Yes, Delete</button>
+    <button onclick="closeDuplicateModal()">Cancel</button>
+  </div>
+
+  <script>
+    let currentShipment = null;
+    let currentPallet = "PLT-Default";
+    let pallets = {};
+    pallets[currentPallet] = [];
+    const settings = {
+      userName: "User",
+      prefixes: [],
+    };
+    let deleteMode = false;
+    let deletePartToRemove = null;
+    let deletePalletToRemoveFrom = null;
+    let duplicateToDelete = null;
+
+    function saveSettings() {
+      settings.userName = document.getElementById("userNameInput").value || "User";
+      settings.prefixes = document.getElementById("prefixInput").value.split(",").map(p => p.trim()).filter(Boolean);
+      document.getElementById("currentUser").textContent = settings.userName;
+      saveShipmentData();
+    }
+
+    function toggleDarkMode() {
+      document.body.classList.toggle("dark-mode");
+    }
+
+    function toggleScanner() {
+      alert("Switching to camera mode not implemented in this version.");
+    }
+
+    function toggleSettings() {
+      const panel = document.getElementById("settingsPanel");
+      panel.style.display = panel.style.display === "block" ? "none" : "block";
+    }
+
+    function showNotification(msg) {
+      const n = document.getElementById("notification");
+      n.textContent = msg;
+      setTimeout(() => { n.textContent = ""; }, 3000);
+    }
+
+    function handleKeyDown(event) {
+      if (event.key !== "Enter") return;
+      const val = event.target.value.trim();
+      event.target.value = "";
+      if (!val) return;
+
+      if (deleteMode) {
+        if (!deletePartToRemove) {
+          deletePartToRemove = val;
+          showNotification("Delete mode: scan pallet to delete from.");
+          return;
+        } else if (!deletePalletToRemoveFrom) {
+          deletePalletToRemoveFrom = val;
+          deletePartFromPallet(deletePartToRemove, deletePalletToRemoveFrom);
+          deleteMode = false;
+          deletePartToRemove = null;
+          deletePalletToRemoveFrom = null;
+          showNotification("Deleted successfully.");
+          renderTabs();
+          saveShipmentData();
+          return;
+        }
+      }
+
+      if (val.toLowerCase() === "delete-part") {
+        deleteMode = true;
+        showNotification("Delete mode activated. Scan part to delete.");
+        return;
+      }
+
+      if (val.startsWith("PLT")) {
+        currentPallet = val;
+        if (!pallets[currentPallet]) pallets[currentPallet] = [];
+        renderTabs();
+        return;
+      }
+
+      if (!pallets[currentPallet]) pallets[currentPallet] = [];
+
+      const delimiter = val.includes("|") ? "|" : "~";
+      const parts = val.split(delimiter);
+      if (parts.length < 4) return alert("Invalid scan format");
+
+      const [Order, Phase, Quantity, PartCode] = parts;
+      const fullScan = val;
+      const isPartValid = settings.prefixes.length === 0 || settings.prefixes.some(prefix => PartCode.startsWith(prefix));
+
+      if (!isPartValid) return alert("Invalid part code prefix");
+
+      // Check duplicate across all pallets
+      let duplicateFound = false;
+      Object.values(pallets).forEach(rows => {
+        rows.forEach(r => {
+          if (r.fullScan === fullScan) duplicateFound = true;
+        });
+      });
+
+      const row = {
+        Order,
+        Phase,
+        Quantity,
+        PartCode,
+        fullScan,
+        Timestamp: new Date().toLocaleString(),
+        Pallet: currentPallet,
+        Remarks: duplicateFound ? `<span class="duplicate" onclick="showDuplicateModal('${fullScan}')">Duplicate</span>` : "",
+      };
+
+      pallets[currentPallet].push(row);
+      renderTabs();
+      saveShipmentData();
+    }
+
+    function renderTabs() {
+      const tabButtons = document.getElementById("tabButtons");
+      const tabContents = document.getElementById("tabContents");
+      tabButtons.innerHTML = "";
+      tabContents.innerHTML = "";
+
+      // Pallet tabs
+      Object.keys(pallets).forEach(pallet => {
+        const btn = document.createElement("button");
+        btn.textContent = pallet;
+        btn.onclick = () => {
+          currentPallet = pallet;
+          renderTabs();
+        };
+        if (pallet === currentPallet) btn.style.fontWeight = "bold";
+        tabButtons.appendChild(btn);
+
+        const div = document.createElement("div");
+        div.id = `tab-${pallet}`;
+        div.className = "tab-content";
+        if (pallet === currentPallet) div.classList.add("active");
+
+        const table = document.createElement("table");
+        const thead = document.createElement("thead");
+        thead.innerHTML = `<tr><th>Order Number</th><th>Phase Number</th><th>Part Code</th><th>Pallet Number</th><th>Part_ID</th><th>Timestamp</th><th>Remarks</th></tr>`;
+        const tbody = document.createElement("tbody");
+
+        pallets[pallet].forEach(r => {
+          const tr = document.createElement("tr");
+          if (r.Remarks.includes("Duplicate")) tr.classList.add("duplicate");
+          tr.innerHTML = `<td>${r.Order}</td><td>${r.Phase}</td><td>${r.PartCode}</td><td>${pallet}</td><td>${r.Quantity}</td><td>${r.Timestamp}</td><td>${r.Remarks}</td>`;
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        div.appendChild(table);
+        tabContents.appendChild(div);
+      });
+
+      // Summary tab
+      const summaryBtn = document.createElement("button");
+      summaryBtn.textContent = "Summary";
+      summaryBtn.onclick = () => {
+        currentPallet = "Summary";
+        renderTabs();
+      };
+      if (currentPallet === "Summary") summaryBtn.style.fontWeight = "bold";
+      tabButtons.appendChild(summaryBtn);
+
+      const summaryDiv = document.createElement("div");
+      summaryDiv.id = "tab-Summary";
+      summaryDiv.className = "tab-content";
+      if (currentPallet === "Summary") summaryDiv.classList.add("active");
+
+      const summaryMap = {};
+      const palletsMap = {};
+      const uniqueScansMap = {};
+
+      Object.entries(pallets).forEach(([pallet, rows]) => {
+        rows.forEach(r => {
+          const key = `${r.Order}||${r.Phase}||${r.PartCode}`;
+          summaryMap[key] = (summaryMap[key] || 0) + 1;
+          palletsMap[key] = palletsMap[key] || new Set();
+          palletsMap[key].add(pallet);
+          uniqueScansMap[key] = uniqueScansMap[key] || new Set();
+          uniqueScansMap[key].add(r.fullScan);
+        });
+      });
+
+      const summaryTable = document.createElement("table");
+      const summaryThead = document.createElement("thead");
+      summaryThead.innerHTML = `<tr><th>Order</th><th>Phase</th><th>Part Code</th><th>Count (Entries)</th><th>Quantity</th><th>Pallet Number(s)</th></tr>`;
+      const summaryTbody = document.createElement("tbody");
+
+      Object.keys(summaryMap).forEach(key => {
+        const [Order, Phase, PartCode] = key.split("||");
+        const countEntries = summaryMap[key];
+        const quantity = uniqueScansMap[key] ? uniqueScansMap[key].size : 0;
+        const palletList = Array.from(palletsMap[key]).join(", ");
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${Order}</td><td>${Phase}</td><td>${PartCode}</td><td>${countEntries}</td><td>${quantity}</td><td>${palletList}</td>`;
+        summaryTbody.appendChild(tr);
+      });
+
+      summaryTable.appendChild(summaryThead);
+      summaryTable.appendChild(summaryTbody);
+      summaryDiv.appendChild(summaryTable);
+      tabContents.appendChild(summaryDiv);
+    }
+
+    function showDuplicateModal(fullScan) {
+      duplicateToDelete = fullScan;
+      document.getElementById("duplicateModal").style.display = "block";
+    }
+
+    function closeDuplicateModal() {
+      document.getElementById("duplicateModal").style.display = "none";
+      duplicateToDelete = null;
+    }
+
+    function deleteDuplicateItem() {
+      if (!duplicateToDelete) return;
+      // Find and remove duplicate item by fullScan from all pallets
+      Object.keys(pallets).forEach(pallet => {
+        pallets[pallet] = pallets[pallet].filter(r => r.fullScan !== duplicateToDelete);
+      });
+      closeDuplicateModal();
+      renderTabs();
+      saveShipmentData();
+      showNotification("Duplicate item deleted.");
+    }
+
+    function deletePartFromPallet(part, pallet) {
+      if (!pallets[pallet]) return alert("Pallet not found");
+      const idx = pallets[pallet].findIndex(r => r.fullScan === part);
+      if (idx === -1) return alert("Part not found on pallet");
+      pallets[pallet].splice(idx, 1);
+    }
+
+    // Shipment functions
+
+    function newShipment() {
+      const shipmentId = prompt("Enter new shipment ID:");
+      if (!shipmentId) return;
+      currentShipment = shipmentId;
+      document.getElementById("shipmentId").textContent = currentShipment;
+      pallets = {};
+      pallets["PLT-Default"] = [];
+      currentPallet = "PLT-Default";
+      showNotification(`New shipment created: ${shipmentId}`);
+      renderTabs();
+      saveShipmentData();
+    }
+
+    function openShipment() {
+      if (!window.localStorage) return alert("Local storage not supported");
+      const keys = Object.keys(localStorage).filter(k => k.startsWith("shipment_"));
+      if (keys.length === 0) return alert("No shipments saved.");
+      const shipmentId = prompt("Enter shipment ID to open:\nAvailable:\n" + keys.map(k => k.replace("shipment_", "")).join("\n"));
+      if (!shipmentId) return;
+      const data = localStorage.getItem("shipment_" + shipmentId);
+      if (!data) return alert("Shipment not found.");
+      try {
+        const obj = JSON.parse(data);
+        currentShipment = shipmentId;
+        document.getElementById("shipmentId").textContent = currentShipment;
+        pallets = obj.pallets || {};
+        currentPallet = Object.keys(pallets)[0] || "PLT-Default";
+        showNotification(`Shipment loaded: ${shipmentId}`);
+        renderTabs();
+      } catch(e) {
+        alert("Error loading shipment data");
+      }
+    }
+
+    function saveShipmentData() {
+      if (!currentShipment) return;
+      const data = { pallets, settings };
+      localStorage.setItem("shipment_" + currentShipment, JSON.stringify(data));
+      showNotification(`Shipment "${currentShipment}" saved.`);
+      setTimeout(() => {
+        const n = document.getElementById("notification");
+        n.textContent = "";
+      }, 2000);
+    }
+
+    function saveShipment() {
+      if (!currentShipment) return alert("No shipment loaded.");
+      saveShipmentData();
+    }
+
+    function deleteShipment() {
+      if (!currentShipment) return alert("No shipment loaded.");
+      if (!confirm(`Are you sure you want to delete shipment "${currentShipment}"? This action cannot be undone.`)) return;
+      localStorage.removeItem("shipment_" + currentShipment);
+      pallets = {};
+      currentShipment = null;
+      document.getElementById("shipmentId").textContent = "";
+      currentPallet = null;
+      renderTabs();
+      showNotification("Shipment deleted.");
+      setTimeout(() => {
+        const n = document.getElementById("notification");
+        n.textContent = "";
+      }, 3000);
+    }
+
+    function exportShipment() {
+      if (!currentShipment) return alert("No shipment loaded.");
+      exportToExcel();
+    }
+
+    function exportToExcel() {
+      if (!currentShipment) return alert("No shipment loaded.");
+
+      const wb = XLSX.utils.book_new();
+
+      Object.keys(pallets).forEach(pallet => {
+        const rows = pallets[pallet].map(r => ({
+          "Order Number": r.Order,
+          "Phase Number": r.Phase,
+          "Part_ID": r.Quantity,
+          "Part Code": r.PartCode,
+          "Pallet Number": pallet,
+          "Timestamp": r.Timestamp,
+          "Remarks": r.Remarks.replace(/<[^>]+>/g, "")
+        }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, pallet.substring(0, 31));
+      });
+
+      const summaryMap = {};
+      const palletsMap = {};
+      const uniqueScansMap = {};
+
+      Object.entries(pallets).forEach(([pallet, rows]) => {
+        rows.forEach(r => {
+          const key = `${r.Order}||${r.Phase}||${r.PartCode}`;
+          summaryMap[key] = (summaryMap[key] || 0) + 1;
+          palletsMap[key] = palletsMap[key] || new Set();
+          palletsMap[key].add(pallet);
+          uniqueScansMap[key] = uniqueScansMap[key] || new Set();
+          uniqueScansMap[key].add(r.fullScan);
+        });
+      });
+
+      const summaryRows = Object.keys(summaryMap).map(key => {
+        const [Order, Phase, PartCode] = key.split("||");
+        return {
+          Order,
+          Phase,
+          "Part Code": PartCode,
+          "Count (Entries)": summaryMap[key],
+          Quantity: uniqueScansMap[key].size,
+          "Pallet Number(s)": Array.from(palletsMap[key]).join(", ")
+        };
+      });
+
+      const summaryWS = XLSX.utils.json_to_sheet(summaryRows);
+      XLSX.utils.book_append_sheet(wb, summaryWS, "Summary");
+
+      XLSX.writeFile(wb, `${currentShipment || "Shipment"}.xlsx`);
+    }
+
+    // On load initialize
+    window.onload = () => {
+      document.getElementById("userNameInput").value = settings.userName;
+      document.getElementById("prefixInput").value = settings.prefixes.join(",");
+      document.getElementById("shipmentId").textContent = currentShipment || "";
+      saveSettings();
+      renderTabs();
+    };
+  </script>
+</body>
+</html>
